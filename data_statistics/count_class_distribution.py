@@ -235,10 +235,9 @@ def plot_class_distribution(df, output_path):
 
     # 1. Bar plot
     bars = ax1.bar(classes, counts, color=colors, alpha=0.85, edgecolor='black', linewidth=1.2)
-    ax1.set_title("Počet PDB struktur pro jednotlivé třídy", fontsize=13, fontweight='bold', pad=12)
-    ax1.set_xlabel("Třída (Kofaktor)", fontsize=11, labelpad=8)
-    ax1.set_ylabel("Počet struktur", fontsize=11)
-    ax1.grid(axis='y', linestyle='--', alpha=0.6)
+    ax1.set_title("Number of PDB Structures per Class", fontsize=13, fontweight='bold', pad=12)
+    ax1.set_xlabel("Class (Cofactor)", fontsize=11, labelpad=8)
+    ax1.set_ylabel("Number of Structures", fontsize=11)
 
     # Popisky nad sloupci
     for bar, count, share in zip(bars, counts, shares):
@@ -269,12 +268,96 @@ def plot_class_distribution(df, output_path):
     for t in texts:
         t.set_fontsize(10.5)
 
-    ax2.set_title("Procentuální podíl tříd v datasetu", fontsize=13, fontweight='bold', pad=12)
+    ax2.set_title("Class Proportions in Dataset", fontsize=13, fontweight='bold', pad=12)
 
     plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close()
     print(f"📈 Graf distribuce tříd uložen do: {output_path}")
+
+def plot_pocket_statistics(df, output_path, class_stats=None):
+    """Vykreslí přehledný vizuální graf statistik predikovaných kapes (P2Rank).
+    Panel 1: Celkový počet kapes per třída s procentuálním podílem.
+    Panel 2: Distribuce počtu kapes na protein (Boxplot s vyznačeným mediánem a průměrem).
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from matplotlib.lines import Line2D
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+
+    classes = df['Class'].tolist()
+    total_pockets = df['Total Pockets'].tolist()
+
+    total_all_pockets = sum(total_pockets)
+    pocket_shares = [(p / total_all_pockets * 100) if total_all_pockets > 0 else 0.0 for p in total_pockets]
+
+    # Příjemná paleta barev shodná s distribucí tříd
+    colors = ['#2E86AB', '#A23B72', '#F18F01', '#C73E1D', '#3B1F2B', '#6A994E'][:len(classes)]
+
+    # 1. Panel: Celkový počet kapes per třída
+    bars1 = ax1.bar(classes, total_pockets, color=colors, alpha=0.85, edgecolor='black', linewidth=1.2)
+    ax1.set_title("Total Predicted Pockets per Class", fontsize=13, fontweight='bold', pad=12)
+    ax1.set_xlabel("Class (Cofactor)", fontsize=11, labelpad=8)
+    ax1.set_ylabel("Total Number of Pockets", fontsize=11)
+
+    # Popisky nad sloupci
+    for bar, count, share in zip(bars1, total_pockets, pocket_shares):
+        height = bar.get_height()
+        ax1.annotate(f'{count}\n({share:.1f} %)',
+                     xy=(bar.get_x() + bar.get_width() / 2, height),
+                     xytext=(0, 4),
+                     textcoords="offset points",
+                     ha='center', va='bottom', fontsize=10, fontweight='semibold')
+
+    ax1.set_ylim(0, max(total_pockets) * 1.18 if total_pockets and max(total_pockets) > 0 else 10)
+
+    # 2. Panel: Distribuce počtu kapes na protein (Boxplot)
+    box_data = []
+    if class_stats:
+        for c in classes:
+            pts = class_stats[c].get('pockets_per_protein', [])
+            box_data.append(pts if pts else [0])
+    else:
+        # Fallback na hodnoty z df, pokud class_stats nejsou k dispozici
+        box_data = [[df.loc[df['Class'] == c, 'Mean Pockets/Prot'].values[0]] for c in classes]
+
+    bp = ax2.boxplot(
+        box_data,
+        positions=range(len(classes)),
+        patch_artist=True,
+        widths=0.55,
+        showmeans=True,
+        meanprops=dict(marker='D', markeredgecolor='black', markerfacecolor='white', markersize=5.5),
+        medianprops=dict(color='black', linewidth=2.0),
+        whiskerprops=dict(color='black', linewidth=1.2),
+        capprops=dict(color='black', linewidth=1.2),
+        flierprops=dict(marker='o', markerfacecolor='#666666', markeredgecolor='none', markersize=2.5, alpha=0.3)
+    )
+
+    for patch, color in zip(bp['boxes'], colors):
+        patch.set_facecolor(color)
+        patch.set_alpha(0.85)
+        patch.set_edgecolor('black')
+        patch.set_linewidth(1.2)
+
+    ax2.set_xticks(range(len(classes)))
+    ax2.set_xticklabels(classes)
+    ax2.set_title("Predicted Pockets per Protein", fontsize=13, fontweight='bold', pad=12)
+    ax2.set_xlabel("Class (Cofactor)", fontsize=11, labelpad=8)
+    ax2.set_ylabel("Pockets per Protein", fontsize=11)
+
+    # Legenda pro medián a průměr
+    legend_elements = [
+        Line2D([0], [0], color='black', lw=2, label='Median'),
+        Line2D([0], [0], marker='D', color='w', markeredgecolor='black', markerfacecolor='white', markersize=6, label='Mean')
+    ]
+    ax2.legend(handles=legend_elements, loc='upper right', frameon=True, fontsize=9)
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"📈 Graf statistik kapes uložen do: {output_path}")
 
 def main():
     parser = argparse.ArgumentParser(
@@ -298,7 +381,11 @@ def main():
     )
     parser.add_argument(
         '--plot', default='class_distribution.png',
-        help="Název souboru grafu (default: class_distribution.png, prázdný řetězec = nekreslit)."
+        help="Název souboru grafu distribuce tříd (default: class_distribution.png, prázdný řetězec = nekreslit)."
+    )
+    parser.add_argument(
+        '--pocket-plot', default='pocket_statistics.png',
+        help="Název souboru grafu statistik kapes (default: pocket_statistics.png, prázdný řetězec = nekreslit)."
     )
     args = parser.parse_args()
 
@@ -344,7 +431,14 @@ def main():
         try:
             plot_class_distribution(df, plot_path)
         except Exception as e:
-            print(f"⚠️ Nepodařilo se vygenerovat graf: {e}")
+            print(f"⚠️ Nepodařilo se vygenerovat graf distribuce tříd: {e}")
+
+    if args.pocket_plot:
+        pocket_plot_path = out_dir / args.pocket_plot
+        try:
+            plot_pocket_statistics(df, pocket_plot_path, class_stats=class_stats)
+        except Exception as e:
+            print(f"⚠️ Nepodařilo se vygenerovat graf statistik kapes: {e}")
 
 if __name__ == '__main__':
     main()

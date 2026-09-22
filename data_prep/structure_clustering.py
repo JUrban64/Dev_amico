@@ -13,24 +13,55 @@ def create_alias_pdb(src_pdb, dst_pdb):
     """Vytvoří fyzickou kopii (symlinky mohou dělat problémy na HPC/v kontejnerech)."""
     shutil.copy2(src_pdb, dst_pdb)
 
-def cluster_structures(target='both', test_limit=None, tmscore_threshold=0.5, nr_threshold=None):
+def find_foldseek_binary(explicit_path=None):
+    """Najde cestu k binárce foldseek."""
+    if explicit_path and os.path.isfile(explicit_path) and os.access(explicit_path, os.X_OK):
+        return explicit_path
+    
+    # 1. Kontrola v PATH
+    which_fs = shutil.which("foldseek")
+    if which_fs:
+        return which_fs
+        
+    # 2. Kontrola v běžných conda / miniforge prostředích
+    candidates = [
+        "/Users/jachymurban/miniforge3/envs/foldseek/bin/foldseek",
+        os.path.expanduser("~/miniforge3/envs/foldseek/bin/foldseek"),
+        os.path.expanduser("~/miniforge3/bin/foldseek"),
+        os.path.expanduser("~/miniconda3/envs/foldseek/bin/foldseek"),
+        os.path.expanduser("~/miniconda3/bin/foldseek"),
+        "/opt/homebrew/bin/foldseek",
+        "/usr/local/bin/foldseek"
+    ]
+    for c in candidates:
+        if os.path.isfile(c) and os.access(c, os.X_OK):
+            return c
+    return "foldseek"
+
+def cluster_structures(target='both', test_limit=None, tmscore_threshold=0.5, nr_threshold=None, 
+                       structures_dir=None, foldseek_bin=None):
     cwd = os.getcwd()
+    pdb_roots = []
+    if structures_dir:
+        pdb_roots.append(os.path.abspath(structures_dir))
+    
     if target == 'binding_sites':
-        pdb_roots = [
-            os.path.join(script_dir, 'Binding_Sites'), os.path.join(script_dir, '..', 'Binding_Sites'),
-            os.path.join(cwd, 'Binding_Sites'), os.path.join(cwd, '..', 'Binding_Sites')
-        ]
+        pdb_roots.extend([
+            os.path.join(script_dir, 'Binding_Sites'),
+            os.path.join(cwd, 'Binding_Sites')
+        ])
     elif target == 'structures':
-        pdb_roots = [
-            os.path.join(script_dir, 'structures'), os.path.join(script_dir, '..', 'structures'),
-            os.path.join(cwd, 'structures'), os.path.join(cwd, '..', 'structures')
-        ]
+        pdb_roots.extend([
+            os.path.join(script_dir, 'structures'),
+            os.path.join(cwd, 'structures')
+        ])
     else:
-        pdb_roots = [
-            os.path.join(script_dir, 'Binding_Sites'), os.path.join(script_dir, '..', 'Binding_Sites'),
-            os.path.join(script_dir, 'structures'), os.path.join(script_dir, '..', 'structures'),
-            os.path.join(cwd, 'Binding_Sites'), os.path.join(cwd, 'structures')
-        ]
+        pdb_roots.extend([
+            os.path.join(script_dir, 'Binding_Sites'),
+            os.path.join(script_dir, 'structures'),
+            os.path.join(cwd, 'Binding_Sites'),
+            os.path.join(cwd, 'structures')
+        ])
     
     pdb_files = []
     for root in pdb_roots:
@@ -91,6 +122,9 @@ def cluster_structures(target='both', test_limit=None, tmscore_threshold=0.5, nr
         fs_tmp_dir = os.path.join(tmp_dir, "fs_tmp")
         os.makedirs(fs_tmp_dir, exist_ok=True)
         
+        fs_bin = find_foldseek_binary(foldseek_bin)
+        print(f"Using Foldseek binary: {fs_bin}")
+
         # === 1. FÁZE: NON-REDUNDANT PRE-FILTRACE ===
         if nr_threshold is not None:
             print(f"\n=== Spouštím NR filtraci s prahem TM-score {nr_threshold} ===")
@@ -99,7 +133,7 @@ def cluster_structures(target='both', test_limit=None, tmscore_threshold=0.5, nr
             os.makedirs(nr_tmp_dir, exist_ok=True)
             
             nr_command = [
-                "foldseek", "easy-cluster", 
+                fs_bin, "easy-cluster", 
                 tmp_pdb_dir, nr_out_prefix, nr_tmp_dir,
                 "--tmscore-threshold", str(nr_threshold),
                 "--alignment-type", "2", 
@@ -114,7 +148,7 @@ def cluster_structures(target='both', test_limit=None, tmscore_threshold=0.5, nr
                 print(f"Error running Foldseek NR pre-filtering: {e}")
                 return None, None, None
             except FileNotFoundError:
-                print("Error: Foldseek executable not found.")
+                print(f"Error: Foldseek executable '{fs_bin}' not found.")
                 return None, None, None
                 
             nr_cluster_tsv = f"{nr_out_prefix}_cluster.tsv"
@@ -152,7 +186,7 @@ def cluster_structures(target='both', test_limit=None, tmscore_threshold=0.5, nr
         print(f"\n=== Spouštím hlavní shlukování s prahem TM-score {tmscore_threshold} ===")
         
         command = [
-            "foldseek", "easy-cluster", 
+            fs_bin, "easy-cluster", 
             tmp_pdb_dir, fs_out_prefix, fs_tmp_dir,
             "--tmscore-threshold", str(tmscore_threshold),
             "--alignment-type", "2", ## change to "2" for faster 3Di alphabet without TM-align 
@@ -249,6 +283,56 @@ def cluster_structures(target='both', test_limit=None, tmscore_threshold=0.5, nr
         
         return splits["train"], splits["validation"], splits["test"], clusters
 
+def generate_clustering_splits(target='structures', tmscore_threshold=0.5, nr_threshold=None,
+                               structures_dir=None, output_dir=None, foldseek_bin=None, test_limit=None):
+    """
+    Spustí shlukování a uloží train, validation, test a clusters.json soubory do výstupní složky.
+    Vrací: (suffix, train, val, test, clusters)
+    """
+    train, val, test, clusters = cluster_structures(
+        target=target, 
+        test_limit=test_limit, 
+        tmscore_threshold=tmscore_threshold,
+        nr_threshold=nr_threshold,
+        structures_dir=structures_dir,
+        foldseek_bin=foldseek_bin
+    )
+
+    if train is None:
+        return None, None, None, None, None
+
+    target_suffix = ""
+    if target == "binding_sites":
+        target_suffix = "_e3"
+    elif target == "structures":
+        target_suffix = "_mil"
+    elif target == "both":
+        target_suffix = "_both"
+
+    nr_suffix = f"_nr{nr_threshold}" if nr_threshold is not None else ""
+    suffix = f"{target_suffix}_{tmscore_threshold}{nr_suffix}"
+
+    save_dir = os.path.abspath(output_dir) if output_dir else script_dir
+    os.makedirs(save_dir, exist_ok=True)
+
+    with open(os.path.join(save_dir, f'train{suffix}.txt'), 'w') as f:
+        for item in train:
+            f.write(f"{item}\n")    
+
+    with open(os.path.join(save_dir, f'validation{suffix}.txt'), 'w') as f:
+        for item in val:
+            f.write(f"{item}\n")
+    
+    with open(os.path.join(save_dir, f'test{suffix}.txt'), 'w') as f:
+        for item in test:
+            f.write(f"{item}\n")
+            
+    with open(os.path.join(save_dir, f'clusters{suffix}.json'), 'w') as f:
+        json.dump(clusters, f, indent=4)
+    
+    print(f"Soubory uloženy do '{save_dir}': train{suffix}.txt, validation{suffix}.txt, test{suffix}.txt, clusters{suffix}.json")
+    return suffix, train, val, test, clusters
+
 if __name__ == "__main__":
     # Nastavení argparse
     parser = argparse.ArgumentParser(description="Cluster PDB structures using Foldseek.")
@@ -259,45 +343,24 @@ if __name__ == "__main__":
                         help="Práh TM-score pro Foldseek easy-cluster (default: 0.5).")
     parser.add_argument("--nr-threshold", type=float, default=None,
                         help="Práh TM-score pro prvotní Non-Redundant filtraci (např. 0.95). Pokud není zadáno, filtrace se neprovede.")
+    parser.add_argument("-d", "--dir", "--structures-dir", dest="structures_dir", default=None,
+                        help="Cesta ke složce se strukturami (pokud není zadána, hledá se v projektu).")
+    parser.add_argument("-o", "--output-dir", default=None,
+                        help="Výstupní složka pro uložení split souborů a klastrů (default: data_prep).")
+    parser.add_argument("--foldseek-bin", default=None,
+                        help="Explicitní cesta k binárce Foldseek.")
     args = parser.parse_args()
 
     # Určení limitu na základě argumentu
     limit = 30 if args.test else None
 
-    # Předání limitu, cíle a prahu do funkce
-    train, validation, test, clusters = cluster_structures(
+    # Spuštění a uložení
+    generate_clustering_splits(
         target=args.target, 
         test_limit=limit, 
         tmscore_threshold=args.tmscore_threshold,
-        nr_threshold=args.nr_threshold
+        nr_threshold=args.nr_threshold,
+        structures_dir=args.structures_dir,
+        output_dir=args.output_dir,
+        foldseek_bin=args.foldseek_bin
     )
-
-    if train is not None:
-        # Určení sufixu podle cíle (target), threshold a případné NR filtrace
-        target_suffix = ""
-        if args.target == "binding_sites":
-            target_suffix = "_e3"
-        elif args.target == "structures":
-            target_suffix = "_mil"
-        elif args.target == "both":
-            target_suffix = "_both"
-
-        nr_suffix = f"_nr{args.nr_threshold}" if args.nr_threshold is not None else ""
-        suffix = f"{target_suffix}_{args.tmscore_threshold}{nr_suffix}"
-
-        with open(os.path.join(script_dir, f'train{suffix}.txt'), 'w') as f:
-            for item in train:
-                f.write(f"{item}\n")    
-
-        with open(os.path.join(script_dir, f'validation{suffix}.txt'), 'w') as f:
-            for item in validation:
-                f.write(f"{item}\n")
-        
-        with open(os.path.join(script_dir, f'test{suffix}.txt'), 'w') as f:
-            for item in test:
-                f.write(f"{item}\n")
-                
-        with open(os.path.join(script_dir, f'clusters{suffix}.json'), 'w') as f:
-            json.dump(clusters, f, indent=4)
-        
-        print(f"Soubory uloženy jako: train{suffix}.txt, validation{suffix}.txt, test{suffix}.txt, clusters{suffix}.json")
