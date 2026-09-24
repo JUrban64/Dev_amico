@@ -47,11 +47,8 @@ SPLIT_COLORS = {
 def find_default_structures_dir():
     """Pokusí se automaticky najít složku se strukturami."""
     candidates = [
-        Path("./structures"),
-        Path("./data_prep/structures"),
+
         Path("../structures"),
-        Path("../PMCP/structures"),
-        Path("/Users/jachymurban/Desktop/PMCP/structures"),
     ]
     for c in candidates:
         if c.exists() and c.is_dir():

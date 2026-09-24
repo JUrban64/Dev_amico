@@ -43,6 +43,34 @@ def load_egnn_bags(data_path):
         
     return bag_list
 
+def normalize_id(pid):
+    if not pid:
+        return ""
+    p = str(pid).strip()
+    p = os.path.basename(p)
+    p = p.split('_pocket_')[0].replace('.pdb', '').replace('_prank_output', '').replace('_predictions', '')
+    p = p.replace('_MERGED', '').replace('_merged', '')
+    return p
+
+def match_id(pid, id_set):
+    if not id_set:
+        return False
+    if pid in id_set:
+        return True
+    norm_p = normalize_id(pid)
+    norm_p_lower = norm_p.lower()
+    if norm_p in id_set or norm_p_lower in id_set:
+        return True
+    for x in id_set:
+        norm_x = normalize_id(x)
+        if norm_x == norm_p or norm_x.lower() == norm_p_lower:
+            return True
+        base_p = norm_p.split('_')[0]
+        base_x = norm_x.split('_')[0]
+        if base_p and base_p.lower() == base_x.lower():
+            return True
+    return False
+
 def get_egnn_splits(data_path, base_dir, split_suffix='_mil_0.5', use_nr=False):
     """
     Načte EGNN bagy a rozdělí je na train, validation a test podle dělení.
@@ -56,11 +84,11 @@ def get_egnn_splits(data_path, base_dir, split_suffix='_mil_0.5', use_nr=False):
         print(f"Používám rozdělení ze split souborů (suffix: {split_suffix})...")
         for b in bags:
             pid = b['protein_id']
-            if pid in train_ids:
+            if match_id(pid, train_ids):
                 train_bags.append(b)
-            elif pid in val_ids:
+            elif match_id(pid, val_ids):
                 val_bags.append(b)
-            elif pid in test_ids:
+            elif match_id(pid, test_ids):
                 test_bags.append(b)
             else:
                 train_bags.append(b)

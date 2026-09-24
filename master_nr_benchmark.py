@@ -256,7 +256,33 @@ def plot_nr_cluster_comparison(comp_df, output_path):
     plt.close()
     print(f"📈 Graf srovnání klastrů uložen do: {output_path}")
 
-def stage_3_run_benchmarks(target_splits, models, epochs=40, out_prefix="nr_benchmark_results", force=False):
+def check_data_dependencies(models, data_dir=None):
+    """Zkontroluje dostupnost datových souborů (.pt tenzorů) pro vybrané modely."""
+    from benchmark_all_models import find_dataset_file
+    needed = set()
+    for m in models:
+        if m in ['standard_mil', 'residue_mil']:
+            needed.add('esm_dataset.pt')
+        elif m in ['sequence_mlp', 'self_attention_mil', 'cross_attention_mil', 'ligand_cross_mil']:
+            needed.add('esm_dataset.pt')
+            needed.add('esm_full_proteins.pt')
+        elif m in ['egnn_mil', 'encoder_mil']:
+            needed.add('egnn_dataset.pt')
+        elif m in ['egnn_ligand_cross_mil']:
+            needed.add('egnn_dataset.pt')
+            needed.add('esm_full_proteins.pt')
+    
+    missing = []
+    found = {}
+    for f in sorted(list(needed)):
+        p = find_dataset_file(f, data_dir)
+        if not p:
+            missing.append(f)
+        else:
+            found[f] = p
+    return found, missing
+
+def stage_3_run_benchmarks(target_splits, models, epochs=40, out_prefix="nr_benchmark_results", data_dir=None, force=False):
     """
     Fáze 3: Spustí benchmark_all_models.py pro zadané modely a splity.
     """
@@ -265,7 +291,25 @@ def stage_3_run_benchmarks(target_splits, models, epochs=40, out_prefix="nr_benc
     print(f"Vybrané splity ({len(target_splits)}): {target_splits}")
     print(f"Vybrané modely ({len(models)}): {models}")
     print(f"Počet epoch: {epochs} | Force přetrénování: {force}")
+    if data_dir:
+        print(f"Vlastní datová složka: {data_dir}")
     print("=" * 80)
+
+    # Pre-flight kontrola datových závislostí
+    found, missing = check_data_dependencies(models, data_dir)
+    if missing:
+        print("\n" + "!" * 80)
+        print("⚠️  VAROVÁNÍ: CHYBĚJÍCÍ DATOVÉ SOUBORY PRO TRÉNOVÁNÍ MODELŮ:")
+        for mf in missing:
+            print(f"   ❌ {mf} nebyl nalezen v data_prep/ ani v projektu!")
+        print("\n   Modely závislé na těchto souborech skončí se stavem FAILED.")
+        print("   Pokud máte soubory uloženy v jiné složce, specifikujte ji přes --data-dir <cesta>.")
+        print("!" * 80 + "\n")
+    if found:
+        print("Nalezené tenzorové datasety:")
+        for k, v in found.items():
+            print(f"   ✅ {k} -> {v}")
+        print()
 
     cmd = [
         sys.executable,
@@ -275,6 +319,8 @@ def stage_3_run_benchmarks(target_splits, models, epochs=40, out_prefix="nr_benc
         "--epochs", str(epochs),
         "--out-prefix", out_prefix
     ]
+    if data_dir:
+        cmd.extend(["--data-dir", str(data_dir)])
     if force:
         cmd.append("--force")
 
@@ -302,9 +348,9 @@ def stage_4_analyze_differences(out_prefix, tmscores, nr_threshold=0.95, models=
     out_path = Path(out_dir) if out_dir else (PROJECT_ROOT / "data_statistics")
     out_path.mkdir(parents=True, exist_ok=True)
 
-    print("\n" + "=" * 105)
+    print("\n" + "=" * 115)
     print(f"FÁZE 4: SROVNÁNÍ VÝKONU MODELŮ: BEZ NR vs. NR {nr_threshold} (HOMOLOGY BIAS ANALÝZA)")
-    print("=" * 105)
+    print("=" * 115)
 
     # Indexace výsledků podle (model, split)
     lookup = {}
@@ -317,8 +363,8 @@ def stage_4_analyze_differences(out_prefix, tmscores, nr_threshold=0.95, models=
     eval_models = models if models and 'all' not in models else ALL_MODEL_KEYS
     delta_rows = []
 
-    print(f"\n{'Model':<22s} | {'TM':<4s} | {'Test F1 (No-NR)':<16s} | {'Test F1 (NR)':<14s} | {'Δ F1':<10s} | {'Test Acc (No-NR)':<18s} | {'Test Acc (NR)':<14s} | {'Δ Acc':<10s}")
-    print("-" * 120)
+    print(f"\n{'Model':<22s} | {'TM':<4s} | {'Test F1 (No-NR)':<20s} | {'Test F1 (NR)':<20s} | {'Δ F1':<10s} | {'Test Acc (No-NR)':<18s} | {'Test Acc (NR)':<14s} | {'Δ Acc':<10s}")
+    print("-" * 128)
 
     for m in eval_models:
         for t in tmscores:
@@ -336,7 +382,7 @@ def stage_4_analyze_differences(out_prefix, tmscores, nr_threshold=0.95, models=
             acc_0 = res_0.get('test_acc') if res_0 else None
             acc_nr = res_nr.get('test_acc') if res_nr else None
 
-            # Výpočet delta (rozdílu)
+            # Výpočet delta (rozdílu) F1
             if f1_0 is not None and f1_nr is not None:
                 delta_f1 = (f1_nr - f1_0) * 100
                 f1_0_str = f"{f1_0 * 100:.2f} %"
@@ -344,10 +390,24 @@ def stage_4_analyze_differences(out_prefix, tmscores, nr_threshold=0.95, models=
                 delta_f1_str = f"{delta_f1:+.2f} %"
             else:
                 delta_f1 = None
-                f1_0_str = f"{f1_0 * 100:.2f} %" if f1_0 is not None else "N/A"
-                f1_nr_str = f"{f1_nr * 100:.2f} %" if f1_nr is not None else "N/A"
+                # Zobrazení konkrétního důvodu pokud běh selhal
+                if f1_0 is not None:
+                    f1_0_str = f"{f1_0 * 100:.2f} %"
+                elif res_0 and res_0.get('status', '').startswith('FAILED:'):
+                    f1_0_str = res_0['status'].replace('FAILED: ', 'FAIL: ')
+                else:
+                    f1_0_str = "N/A"
+
+                if f1_nr is not None:
+                    f1_nr_str = f"{f1_nr * 100:.2f} %"
+                elif res_nr and res_nr.get('status', '').startswith('FAILED:'):
+                    f1_nr_str = res_nr['status'].replace('FAILED: ', 'FAIL: ')
+                else:
+                    f1_nr_str = "N/A"
+
                 delta_f1_str = "N/A"
 
+            # Výpočet delta Accuracy
             if acc_0 is not None and acc_nr is not None:
                 delta_acc = (acc_nr - acc_0) * 100
                 acc_0_str = f"{acc_0 * 100:.2f} %"
@@ -359,7 +419,11 @@ def stage_4_analyze_differences(out_prefix, tmscores, nr_threshold=0.95, models=
                 acc_nr_str = f"{acc_nr * 100:.2f} %" if acc_nr is not None else "N/A"
                 delta_acc_str = "N/A"
 
-            print(f"{m:<22s} | {t:<4.1f} | {f1_0_str:<16s} | {f1_nr_str:<14s} | {delta_f1_str:<10s} | {acc_0_str:<18s} | {acc_nr_str:<14s} | {delta_acc_str:<10s}")
+            # Zkrácení příliš dlouhých chybových hlášek pro tabulku
+            f1_0_disp = (f1_0_str[:18] + '..') if len(f1_0_str) > 20 else f1_0_str
+            f1_nr_disp = (f1_nr_str[:18] + '..') if len(f1_nr_str) > 20 else f1_nr_str
+
+            print(f"{m:<22s} | {t:<4.1f} | {f1_0_disp:<20s} | {f1_nr_disp:<20s} | {delta_f1_str:<10s} | {acc_0_str:<18s} | {acc_nr_str:<14s} | {delta_acc_str:<10s}")
 
             delta_rows.append({
                 'model': m,
@@ -369,10 +433,52 @@ def stage_4_analyze_differences(out_prefix, tmscores, nr_threshold=0.95, models=
                 'delta_f1': round(delta_f1, 2) if delta_f1 is not None else None,
                 'acc_no_nr': round(acc_0 * 100, 2) if acc_0 is not None else None,
                 'acc_nr': round(acc_nr * 100, 2) if acc_nr is not None else None,
-                'delta_acc': round(delta_acc, 2) if delta_acc is not None else None
+                'delta_acc': round(delta_acc, 2) if delta_acc is not None else None,
+                'status_no_nr': res_0.get('status') if res_0 else None,
+                'status_nr': res_nr.get('status') if res_nr else None
             })
 
-    print("=" * 120 + "\n")
+    print("=" * 128 + "\n")
+
+    # Diagnostika selhaných běhů
+    failed_runs = []
+    for entry in results_data:
+        status = entry.get('status')
+        if status and status != 'SUCCESS':
+            failed_runs.append(entry)
+
+    if failed_runs:
+        print("=" * 95)
+        print("⚠️  DIAGNOSTIKA SELHANÝCH MODELŮ:")
+        print("=" * 95)
+        by_reason = defaultdict(list)
+        for fr in failed_runs:
+            m = fr.get('model', '?')
+            sp = fr.get('split', '?')
+            reason = fr.get('status', 'Neznámá chyba')
+            by_reason[reason].append(f"{m} ({sp})")
+        
+        for reason, models_list in by_reason.items():
+            print(f"\n❌ {reason}  ({len(models_list)} běhů):")
+            unique_models = sorted(list(set(m.split(' (')[0] for m in models_list)))
+            print(f"   Zasažené modely: {', '.join(unique_models)}")
+            if len(models_list) <= 8:
+                print(f"   Běhy: {', '.join(models_list)}")
+            else:
+                print(f"   Celkem {len(models_list)} kombinací model x split.")
+        
+        print("\n💡 DOPORUČENÝ POSTUP K NÁPRAVĚ:")
+        if any("nenalezen" in r or "chybí" in r for r in by_reason):
+            print(" 1. Chybějící .pt tenzory: Zkontrolujte, zda máte v data_prep/ vytvořené soubory:")
+            print("    - esm_dataset.pt          (kapsy z P2Ranku)")
+            print("    - esm_full_proteins.pt    (celoproteonové embeddingy z ESM-2)")
+            print("    - egnn_dataset.pt         (3D grafy pro EGNN)")
+            print("    Pokud jsou v jiné složce, spusťte master skript s argumentem:")
+            print("      python master_nr_benchmark.py --data-dir /cesta/ke/slozce/s/pt/soubory --force")
+        if any("prázdný train set" in r for r in by_reason):
+            print(" 2. Prázdný train set: Zkontrolujte, zda ID proteinů v data_prep/train_mil_*.txt")
+            print("    odpovídají formátu ID v esm_dataset.pt.")
+        print("=" * 95 + "\n")
 
     if not delta_rows:
         print("⚠️ Žádná odpovídající data pro srovnání nebyla nalezena.")
@@ -502,6 +608,10 @@ def main():
         help="Počet trénovacích epoch pro benchmarkované modely (default: 40)."
     )
     parser.add_argument(
+        '--data-dir', default=None,
+        help="Cesta ke složce obsahující předpočítané tenzory (esm_dataset.pt, esm_full_proteins.pt, egnn_dataset.pt)."
+    )
+    parser.add_argument(
         '--out-prefix', default="nr_benchmark_results",
         help="Prefix pro výstupní soubory benchmarku (default: nr_benchmark_results)."
     )
@@ -528,6 +638,8 @@ def main():
     print("       AMICO MASTER PIPELINE: NON-REDUNDANT (NR) EVALUATION       ")
     print("=" * 80)
     print(f"Detekovaná složka se strukturami: {struct_dir}")
+    if args.data_dir:
+        print(f"Zadaná datová složka s tenzory: {args.data_dir}")
 
     # 1. FÁZE: Generování splitů
     if not args.skip_clustering and not args.only_analysis:
@@ -561,6 +673,7 @@ def main():
             models=target_models,
             epochs=args.epochs,
             out_prefix=args.out_prefix,
+            data_dir=args.data_dir,
             force=args.force
         )
 

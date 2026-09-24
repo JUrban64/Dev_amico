@@ -46,16 +46,53 @@ class EarlyStopping:
                 self.early_stop = True
             return False
 
+def normalize_id(pid):
+    if not pid:
+        return ""
+    p = str(pid).strip()
+    p = os.path.basename(p)
+    p = p.split('_pocket_')[0].replace('.pdb', '').replace('_prank_output', '').replace('_predictions', '')
+    p = p.replace('_MERGED', '').replace('_merged', '')
+    return p
+
 def match_id(pid, id_set):
+    if not id_set:
+        return False
     if pid in id_set:
         return True
-    clean_pid = pid.replace('_MERGED', '').replace('.pdb', '')
-    if clean_pid in id_set:
+    norm_p = normalize_id(pid)
+    norm_p_lower = norm_p.lower()
+    if norm_p in id_set or norm_p_lower in id_set:
         return True
     for x in id_set:
-        if x.replace('_MERGED', '').replace('.pdb', '') == clean_pid:
+        norm_x = normalize_id(x)
+        if norm_x == norm_p or norm_x.lower() == norm_p_lower:
+            return True
+        base_p = norm_p.split('_')[0]
+        base_x = norm_x.split('_')[0]
+        if base_p and base_p.lower() == base_x.lower():
             return True
     return False
+
+def find_dataset_file(filename, data_dir=None):
+    """Dynamicky vyhledá datový soubor v zadané složce, v data_prep/ i v kořenu projektu."""
+    candidates = []
+    if data_dir:
+        candidates.extend([
+            os.path.join(data_dir, filename),
+            os.path.join(data_dir, 'data_prep', filename),
+        ])
+    candidates.extend([
+        os.path.join(PROJECT_ROOT, 'data_prep', filename),
+        os.path.join(PROJECT_ROOT, filename),
+        os.path.join(PROJECT_ROOT, '..', filename),
+        os.path.join(PROJECT_ROOT, '..', 'data_prep', filename),
+    ])
+    for c in candidates:
+        if os.path.exists(c):
+            return os.path.abspath(c)
+    return None
+
 
 # ============================================================================
 # 1. FOLDSEEK 1-NN BENCHMARK
@@ -114,12 +151,10 @@ def run_foldseek_benchmark(split_suffix, use_nr=False, all_pdbs=False):
 # ============================================================================
 # 2. STANDARD MIL (AttentionMIL_ESM)
 # ============================================================================
-def run_standard_mil(split_suffix, device, epochs=40, lr=5e-5, weight_decay=1e-4, dropout=0.25, label_smoothing=0.1, batch_size=32):
+def run_standard_mil(split_suffix, device, epochs=40, lr=5e-5, weight_decay=1e-4, dropout=0.25, label_smoothing=0.1, batch_size=32, data_dir=None):
     print(f"\n---> Trénuji Standard Attention MIL (split: {split_suffix})...")
-    data_path = os.path.join(PROJECT_ROOT, 'data_prep', 'esm_dataset.pt')
-    if not os.path.exists(data_path):
-        data_path = os.path.join(PROJECT_ROOT, 'esm_dataset.pt')
-    if not os.path.exists(data_path):
+    data_path = find_dataset_file('esm_dataset.pt', data_dir)
+    if not data_path:
         return {"status": "FAILED: esm_dataset.pt nenalezen"}
 
     bags = load_data_from_tensors(data_path, mode='pockets')
@@ -136,7 +171,7 @@ def run_standard_mil(split_suffix, device, epochs=40, lr=5e-5, weight_decay=1e-4
             test_bags.append(b)
 
     if len(train_bags) == 0:
-        return {"status": "FAILED: prázdný train set"}
+        return {"status": f"FAILED: prázdný train set (načteno {len(train_ids)} train ID, v datasetu {len(bags)} proteinů)"}
 
     from torch.nn.utils.rnn import pad_sequence
     def collate_fn_mil(batch):
@@ -238,24 +273,22 @@ def run_standard_mil(split_suffix, device, epochs=40, lr=5e-5, weight_decay=1e-4
 # ============================================================================
 # 2B. PURE SEQUENCE ESM-2 MLP (Bez kapes, bez ligandů)
 # ============================================================================
-def run_sequence_mlp(split_suffix, device, epochs=40, lr=5e-5, weight_decay=1e-3, dropout=0.3, label_smoothing=0.1, batch_size=64):
+def run_sequence_mlp(split_suffix, device, epochs=40, lr=5e-5, weight_decay=1e-3, dropout=0.3, label_smoothing=0.1, batch_size=64, data_dir=None):
     print(f"\n---> Trénuji Pure Sequence ESM-2 MLP (split: {split_suffix})...")
     from dataset_cross_mil import load_cross_mil_data
     from model_sequence_mlp import SequenceMLPClassifier
 
-    base_dir = PROJECT_ROOT
-    pockets_path = os.path.join(base_dir, 'data_prep', 'esm_dataset.pt')
-    if not os.path.exists(pockets_path):
-        pockets_path = os.path.join(base_dir, 'esm_dataset.pt')
-    full_proteins_path = os.path.join(base_dir, 'data_prep', 'esm_full_proteins.pt')
-    if not os.path.exists(full_proteins_path):
-        full_proteins_path = os.path.join(base_dir, 'esm_full_proteins.pt')
+    pockets_path = find_dataset_file('esm_dataset.pt', data_dir)
+    full_proteins_path = find_dataset_file('esm_full_proteins.pt', data_dir)
 
-    if not os.path.exists(pockets_path) or not os.path.exists(full_proteins_path):
-        return {"status": "FAILED: chybí esm_dataset.pt nebo esm_full_proteins.pt"}
+    if not pockets_path or not full_proteins_path:
+        missing = []
+        if not pockets_path: missing.append('esm_dataset.pt')
+        if not full_proteins_path: missing.append('esm_full_proteins.pt')
+        return {"status": f"FAILED: chybí {', '.join(missing)}"}
 
     all_bags = load_cross_mil_data(pockets_path, full_proteins_path, mode='pockets')
-    train_ids, val_ids, test_ids = load_split_ids(base_dir, split_suffix=split_suffix)
+    train_ids, val_ids, test_ids = load_split_ids(PROJECT_ROOT, split_suffix=split_suffix)
 
     train_bags, val_bags, test_bags = [], [], []
     for b in all_bags:
@@ -268,7 +301,7 @@ def run_sequence_mlp(split_suffix, device, epochs=40, lr=5e-5, weight_decay=1e-3
             test_bags.append(b)
 
     if len(train_bags) == 0:
-        return {"status": "FAILED: prázdný train set"}
+        return {"status": f"FAILED: prázdný train set (načteno {len(train_ids)} train ID, v datasetu {len(all_bags)} proteinů)"}
 
     def collate_seq(batch):
         feats = torch.stack([item['full_protein_feature'] for item in batch])
@@ -359,12 +392,10 @@ def run_sequence_mlp(split_suffix, device, epochs=40, lr=5e-5, weight_decay=1e-3
 # ============================================================================
 # 2C. PER-RESIDUE ATTENTION MIL (Všechna rezidua bez průměrování do kapes)
 # ============================================================================
-def run_residue_mil(split_suffix, device, epochs=40, lr=5e-5, weight_decay=1e-4, dropout=0.25, label_smoothing=0.1, batch_size=32):
+def run_residue_mil(split_suffix, device, epochs=40, lr=5e-5, weight_decay=1e-4, dropout=0.25, label_smoothing=0.1, batch_size=32, data_dir=None):
     print(f"\n---> Trénuji Per-Residue Attention MIL (split: {split_suffix})...")
-    data_path = os.path.join(PROJECT_ROOT, 'data_prep', 'esm_dataset.pt')
-    if not os.path.exists(data_path):
-        data_path = os.path.join(PROJECT_ROOT, 'esm_dataset.pt')
-    if not os.path.exists(data_path):
+    data_path = find_dataset_file('esm_dataset.pt', data_dir)
+    if not data_path:
         return {"status": "FAILED: esm_dataset.pt nenalezen"}
 
     bags = load_data_from_tensors(data_path, mode='residues')
@@ -381,7 +412,7 @@ def run_residue_mil(split_suffix, device, epochs=40, lr=5e-5, weight_decay=1e-4,
             test_bags.append(b)
 
     if len(train_bags) == 0:
-        return {"status": "FAILED: prázdný train set"}
+        return {"status": f"FAILED: prázdný train set (načteno {len(train_ids)} train ID, v datasetu {len(bags)} proteinů)"}
 
     from torch.nn.utils.rnn import pad_sequence
     def collate_fn_mil(batch):
@@ -483,21 +514,19 @@ def run_residue_mil(split_suffix, device, epochs=40, lr=5e-5, weight_decay=1e-4,
 # ============================================================================
 # 3. GENERIC POCKET + PROTEIN CROSS-ATTENTION / SELF-ATTENTION RUNNER
 # ============================================================================
-def run_cross_mil_variant(model_name, split_suffix, device, epochs=40, lr=4.8e-5, weight_decay=1e-4, dropout=0.2, label_smoothing=0.15, batch_size=32):
+def run_cross_mil_variant(model_name, split_suffix, device, epochs=40, lr=4.8e-5, weight_decay=1e-4, dropout=0.2, label_smoothing=0.15, batch_size=32, data_dir=None):
     print(f"\n---> Trénuji {model_name} (split: {split_suffix})...")
-    base_dir = PROJECT_ROOT
-    pockets_path = os.path.join(base_dir, 'data_prep', 'esm_dataset.pt')
-    if not os.path.exists(pockets_path):
-        pockets_path = os.path.join(base_dir, 'esm_dataset.pt')
-    full_proteins_path = os.path.join(base_dir, 'data_prep', 'esm_full_proteins.pt')
-    if not os.path.exists(full_proteins_path):
-        full_proteins_path = os.path.join(base_dir, 'esm_full_proteins.pt')
+    pockets_path = find_dataset_file('esm_dataset.pt', data_dir)
+    full_proteins_path = find_dataset_file('esm_full_proteins.pt', data_dir)
 
-    if not os.path.exists(pockets_path) or not os.path.exists(full_proteins_path):
-        return {"status": "FAILED: chybí esm_dataset.pt nebo esm_full_proteins.pt"}
+    if not pockets_path or not full_proteins_path:
+        missing = []
+        if not pockets_path: missing.append('esm_dataset.pt')
+        if not full_proteins_path: missing.append('esm_full_proteins.pt')
+        return {"status": f"FAILED: chybí {', '.join(missing)}"}
 
     all_bags = load_cross_mil_data(pockets_path, full_proteins_path, mode='pockets')
-    train_ids, val_ids, test_ids = load_split_ids(base_dir, split_suffix=split_suffix)
+    train_ids, val_ids, test_ids = load_split_ids(PROJECT_ROOT, split_suffix=split_suffix)
 
     train_bags, val_bags, test_bags = [], [], []
     for b in all_bags:
@@ -510,7 +539,7 @@ def run_cross_mil_variant(model_name, split_suffix, device, epochs=40, lr=4.8e-5
             test_bags.append(b)
 
     if len(train_bags) == 0:
-        return {"status": "FAILED: prázdný train set"}
+        return {"status": f"FAILED: prázdný train set (načteno {len(train_ids)} train ID, v datasetu {len(all_bags)} proteinů)"}
 
     train_loader = DataLoader(CrossMilDataset(train_bags), batch_size=batch_size, shuffle=True, collate_fn=custom_collate_fn)
     val_loader = DataLoader(CrossMilDataset(val_bags), batch_size=batch_size, shuffle=False, collate_fn=custom_collate_fn)
@@ -611,16 +640,14 @@ def run_cross_mil_variant(model_name, split_suffix, device, epochs=40, lr=4.8e-5
 # ============================================================================
 # 4. EGNN SCORE-LEVEL MIL & ENCODER MIL RUNNERS
 # ============================================================================
-def run_egnn_mil(split_suffix, device, epochs=40, lr=5e-5, weight_decay=1e-3, dropout=0.3, label_smoothing=0.1, batch_size=16):
+def run_egnn_mil(split_suffix, device, epochs=40, lr=5e-5, weight_decay=1e-3, dropout=0.3, label_smoothing=0.1, batch_size=16, data_dir=None):
     print(f"\n---> Trénuji EGNN Score-Level MIL (split: {split_suffix})...")
     from dataset_egnn import get_egnn_splits
     from model_egnn_mil import EGNN_MIL_Classifier
     from torch_geometric.data import Batch
 
-    data_path = os.path.join(PROJECT_ROOT, 'data_prep', 'egnn_dataset.pt')
-    if not os.path.exists(data_path):
-        data_path = os.path.join(PROJECT_ROOT, 'egnn_dataset.pt')
-    if not os.path.exists(data_path):
+    data_path = find_dataset_file('egnn_dataset.pt', data_dir)
+    if not data_path:
         return {"status": "FAILED: egnn_dataset.pt nenalezen"}
 
     train_bags, val_bags, test_bags = get_egnn_splits(data_path, PROJECT_ROOT, split_suffix=split_suffix)
@@ -727,16 +754,14 @@ def run_egnn_mil(split_suffix, device, epochs=40, lr=5e-5, weight_decay=1e-3, dr
         "status": "SUCCESS"
     }
 
-def run_encoder_mil(split_suffix, device, epochs=40, lr=5e-5, weight_decay=1e-3, dropout=0.3, label_smoothing=0.1, batch_size=16):
+def run_encoder_mil(split_suffix, device, epochs=40, lr=5e-5, weight_decay=1e-3, dropout=0.3, label_smoothing=0.1, batch_size=16, data_dir=None):
     print(f"\n---> Trénuji EGNN Embedding-Level Encoder MIL (split: {split_suffix})...")
     from dataset_egnn import get_egnn_splits
     from model_encoder_mil import EGNN_Encoder_MIL_Classifier
     from torch_geometric.data import Batch
 
-    data_path = os.path.join(PROJECT_ROOT, 'data_prep', 'egnn_dataset.pt')
-    if not os.path.exists(data_path):
-        data_path = os.path.join(PROJECT_ROOT, 'egnn_dataset.pt')
-    if not os.path.exists(data_path):
+    data_path = find_dataset_file('egnn_dataset.pt', data_dir)
+    if not data_path:
         return {"status": "FAILED: egnn_dataset.pt nenalezen"}
 
     train_bags, val_bags, test_bags = get_egnn_splits(data_path, PROJECT_ROOT, split_suffix=split_suffix)
@@ -848,20 +873,19 @@ def run_encoder_mil(split_suffix, device, epochs=40, lr=5e-5, weight_decay=1e-3,
 # ============================================================================
 # 5. EGNN HYBRID RUNNER (3D Graph + Ligand Cross-Attention)
 # ============================================================================
-def run_egnn_ligand_cross_mil(split_suffix, device, epochs=40, lr=5e-5, weight_decay=1e-3, dropout=0.35, label_smoothing=0.1, batch_size=16):
+def run_egnn_ligand_cross_mil(split_suffix, device, epochs=40, lr=5e-5, weight_decay=1e-3, dropout=0.35, label_smoothing=0.1, batch_size=16, data_dir=None):
     print(f"\n---> Trénuji EGNN + Ligand Cross-Attention MIL (split: {split_suffix})...")
     from dataset_egnn_cross_mil import get_egnn_cross_splits, egnn_cross_collate_fn
     from model_egnn_ligand_cross_attention_mil import EGNN_Ligand_Cross_Attention_MIL
 
-    data_path = os.path.join(PROJECT_ROOT, 'data_prep', 'egnn_dataset.pt')
-    if not os.path.exists(data_path):
-        data_path = os.path.join(PROJECT_ROOT, 'egnn_dataset.pt')
-    full_proteins_path = os.path.join(PROJECT_ROOT, 'data_prep', 'esm_full_proteins.pt')
-    if not os.path.exists(full_proteins_path):
-        full_proteins_path = os.path.join(PROJECT_ROOT, 'esm_full_proteins.pt')
+    data_path = find_dataset_file('egnn_dataset.pt', data_dir)
+    full_proteins_path = find_dataset_file('esm_full_proteins.pt', data_dir)
 
-    if not os.path.exists(data_path):
-        return {"status": "FAILED: egnn_dataset.pt nenalezen"}
+    if not data_path or not full_proteins_path:
+        missing = []
+        if not data_path: missing.append('egnn_dataset.pt')
+        if not full_proteins_path: missing.append('esm_full_proteins.pt')
+        return {"status": f"FAILED: chybí {', '.join(missing)}"}
 
     train_bags, val_bags, test_bags = get_egnn_cross_splits(
         data_path=data_path,
@@ -996,6 +1020,7 @@ def main():
                         help="Splity k evaluaci: mil_0.3, mil_0.5, mil_0.7, struct_pocket_0.5_0.5 nebo all")
     parser.add_argument('--epochs', type=int, default=40, help="Maximální počet epoch pro trénované modely")
     parser.add_argument('--force', action='store_true', help="Znovu spustit i již hotové evaluace")
+    parser.add_argument('--data-dir', default=None, help="Cesta ke složce obsahující předpočítané tenzory (esm_dataset.pt, esm_full_proteins.pt, egnn_dataset.pt)")
     parser.add_argument('--out-prefix', default='benchmark_results', help="Prefix pro výstupní JSON, CSV a MD soubory")
     args = parser.parse_args()
 
@@ -1004,6 +1029,8 @@ def main():
     print("      AMICO MASTER BENCHMARK - SROVNÁNÍ VŠECH MODELŮ      ")
     print("="*75)
     print(f"Zařízení: {device}")
+    if args.data_dir:
+        print(f"Vlastní datová složka (--data-dir): {args.data_dir}")
 
     # 1. Zjištění splitů
     all_available_splits = discover_splits()
@@ -1060,7 +1087,6 @@ def main():
     # 4. Spouštění benchmarku pro každou kombinaci
     total_runs = len(target_splits) * len(target_models)
     run_idx = 0
-    flat_rows = []
 
     for sfx in target_splits:
         for model_name in target_models:
@@ -1070,26 +1096,42 @@ def main():
             print("-" * 75)
 
             if is_already_done(model_name, sfx) and not args.force:
-                print(f"Přeskakuji (již hotovo). Použijte --force pro přetrénování.")
+                print(f"Přeskakuji (již úspěšně dokončeno). Použijte --force pro přetrénování.")
                 continue
 
             res = {}
-            if model_name == "foldseek":
-                res = run_foldseek_benchmark(sfx)
-            elif model_name == "sequence_mlp":
-                res = run_sequence_mlp(sfx, device=device, epochs=args.epochs)
-            elif model_name == "residue_mil":
-                res = run_residue_mil(sfx, device=device, epochs=args.epochs)
-            elif model_name == "standard_mil":
-                res = run_standard_mil(sfx, device=device, epochs=args.epochs)
-            elif model_name in ["self_attention_mil", "cross_attention_mil", "ligand_cross_mil"]:
-                res = run_cross_mil_variant(model_name, sfx, device=device, epochs=args.epochs)
-            elif model_name == "egnn_mil":
-                res = run_egnn_mil(sfx, device=device, epochs=args.epochs)
-            elif model_name == "encoder_mil":
-                res = run_encoder_mil(sfx, device=device, epochs=args.epochs)
-            elif model_name == "egnn_ligand_cross_mil":
-                res = run_egnn_ligand_cross_mil(sfx, device=device, epochs=args.epochs)
+            try:
+                if model_name == "foldseek":
+                    res = run_foldseek_benchmark(sfx)
+                elif model_name == "sequence_mlp":
+                    res = run_sequence_mlp(sfx, device=device, epochs=args.epochs, data_dir=args.data_dir)
+                elif model_name == "residue_mil":
+                    res = run_residue_mil(sfx, device=device, epochs=args.epochs, data_dir=args.data_dir)
+                elif model_name == "standard_mil":
+                    res = run_standard_mil(sfx, device=device, epochs=args.epochs, data_dir=args.data_dir)
+                elif model_name in ["self_attention_mil", "cross_attention_mil", "ligand_cross_mil"]:
+                    res = run_cross_mil_variant(model_name, sfx, device=device, epochs=args.epochs, data_dir=args.data_dir)
+                elif model_name == "egnn_mil":
+                    res = run_egnn_mil(sfx, device=device, epochs=args.epochs, data_dir=args.data_dir)
+                elif model_name == "encoder_mil":
+                    res = run_encoder_mil(sfx, device=device, epochs=args.epochs, data_dir=args.data_dir)
+                elif model_name == "egnn_ligand_cross_mil":
+                    res = run_egnn_ligand_cross_mil(sfx, device=device, epochs=args.epochs, data_dir=args.data_dir)
+            except Exception as e:
+                import traceback
+                print(f"❌ Neočekávaná výjimka při trénování {model_name} na {sfx}:\n{e}")
+                traceback.print_exc()
+                res = {"status": f"FAILED: {e}"}
+
+            # Přehledný log výsledku
+            status = res.get("status", "UNKNOWN")
+            if status == "SUCCESS":
+                f1_val = res.get('test_macro_f1', 0.0)
+                acc_val = res.get('test_acc', 0.0)
+                t_sec = res.get('time_sec', 0.0)
+                print(f"✅ [{model_name} | {sfx}] DOKONČENO ({t_sec:.1f} s) -> Test F1: {f1_val:.4f} | Test Acc: {acc_val:.4f}")
+            else:
+                print(f"❌ [{model_name} | {sfx}] SELHALO -> {status}")
 
             record = {
                 "model": model_name,
@@ -1106,74 +1148,78 @@ def main():
             with open(json_path, 'w') as f:
                 json.dump(results_data, f, indent=4)
 
-            # Generování CSV
+            # Průběžné generování CSV
             flat_rows = []
             for r in results_data:
-                if r.get("status") == "SUCCESS":
-                    row = {
-                        "Model": r.get("model"),
-                        "Split": r.get("split"),
-                        "Val_Acc": r.get("val_acc"),
-                        "Val_Macro_F1": r.get("val_macro_f1"),
-                        "Test_Acc": r.get("test_acc"),
-                        "Test_Macro_F1": r.get("test_macro_f1"),
-                        "Time_s": r.get("time_sec")
-                    }
-                    if "per_class_f1" in r and isinstance(r["per_class_f1"], dict):
-                        for cname in TARGET_NAMES:
-                            row[f"Test_F1_{cname}"] = r["per_class_f1"].get(cname, 0.0)
-                    flat_rows.append(row)
+                row = {
+                    "Model": r.get("model"),
+                    "Split": r.get("split"),
+                    "Status": r.get("status", "UNKNOWN"),
+                    "Val_Acc": r.get("val_acc"),
+                    "Val_Macro_F1": r.get("val_macro_f1"),
+                    "Test_Acc": r.get("test_acc"),
+                    "Test_Macro_F1": r.get("test_macro_f1"),
+                    "Time_s": r.get("time_sec")
+                }
+                if "per_class_f1" in r and isinstance(r["per_class_f1"], dict):
+                    for cname in TARGET_NAMES:
+                        row[f"Test_F1_{cname}"] = r["per_class_f1"].get(cname, 0.0)
+                flat_rows.append(row)
 
             if flat_rows:
                 df = pd.DataFrame(flat_rows)
                 df.to_csv(csv_path, index=False)
 
     # 5. Generování finálního souhrnného Markdown reportu
-    print("\n" + "="*75)
+    print("\n" + "="*80)
     print("                  FINÁLNÍ BENCHMARK SOUHRN                  ")
-    print("="*75)
+    print("="*80)
 
-    # Vždy sestavíme flat_rows ze všech načtených/dokončených výsledků v results_data
     flat_rows = []
     for r in results_data:
-        if r.get("status") == "SUCCESS":
-            row = {
-                "Model": r.get("model"),
-                "Split": r.get("split"),
-                "Val_Acc": r.get("val_acc"),
-                "Val_Macro_F1": r.get("val_macro_f1"),
-                "Test_Acc": r.get("test_acc"),
-                "Test_Macro_F1": r.get("test_macro_f1"),
-                "Time_s": r.get("time_sec")
-            }
-            if "per_class_f1" in r and isinstance(r["per_class_f1"], dict):
-                for cname in TARGET_NAMES:
-                    row[f"Test_F1_{cname}"] = r["per_class_f1"].get(cname, 0.0)
-            flat_rows.append(row)
+        row = {
+            "Model": r.get("model"),
+            "Split": r.get("split"),
+            "Status": r.get("status", "UNKNOWN"),
+            "Val_Acc": r.get("val_acc"),
+            "Val_Macro_F1": r.get("val_macro_f1"),
+            "Test_Acc": r.get("test_acc"),
+            "Test_Macro_F1": r.get("test_macro_f1"),
+            "Time_s": r.get("time_sec")
+        }
+        if "per_class_f1" in r and isinstance(r["per_class_f1"], dict):
+            for cname in TARGET_NAMES:
+                row[f"Test_F1_{cname}"] = r["per_class_f1"].get(cname, 0.0)
+        flat_rows.append(row)
 
     if flat_rows:
         df = pd.DataFrame(flat_rows)
         for col in ["Val_Acc", "Val_Macro_F1", "Test_Acc", "Test_Macro_F1"]:
             if col in df.columns:
                 df[col] = df[col].apply(lambda x: f"{x:.4f}" if pd.notnull(x) else "-")
+        if "Time_s" in df.columns:
+            df["Time_s"] = df["Time_s"].apply(lambda x: f"{x:.1f}" if pd.notnull(x) else "-")
 
         print(df.to_string(index=False))
 
         # Uložení Markdown reportu
-        with open(md_path, 'w') as f:
+        with open(md_path, 'w', encoding='utf-8') as f:
             f.write("# AMICO: Kompletní Srovnání Všech Modelů\n\n")
             f.write(f"Vygenerováno: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-            f.write("### Celkové výsledky (Test Macro F1 & Test Accuracy)\n\n")
+            f.write("### Celkové výsledky\n\n")
             f.write(df.to_markdown(index=False))
             f.write("\n\n")
             
-            # Pivot table (Model x Split -> Test Macro F1)
+            # Pivot table (Model x Split -> Test Macro F1) pouze pro úspěšné běhy
             try:
                 raw_df = pd.DataFrame(flat_rows)
-                pivot = raw_df.pivot(index="Model", columns="Split", values="Test_Macro_F1")
-                f.write("### Pivot Tabulka: Test Macro F1 napříč Splity\n\n")
-                f.write(pivot.to_markdown())
-                f.write("\n")
+                success_df = raw_df[raw_df['Status'] == 'SUCCESS'].copy()
+                if not success_df.empty:
+                    success_df['Test_Macro_F1'] = pd.to_numeric(success_df['Test_Macro_F1'], errors='coerce')
+                    pivot = success_df.pivot(index="Model", columns="Split", values="Test_Macro_F1")
+                    f.write("### Pivot Tabulka: Test Macro F1 napříč Splity\n\n")
+                    f.write(pivot.to_markdown())
+                    f.write("\n")
             except Exception:
                 pass
 
@@ -1182,7 +1228,7 @@ def main():
         print(f" - CSV:  {csv_path}")
         print(f" - MD:   {md_path}")
     else:
-        print("Žádné úspěšné výsledky k zobrazení.")
+        print("Žádné výsledky k zobrazení.")
 
 if __name__ == '__main__':
     main()

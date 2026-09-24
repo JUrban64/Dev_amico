@@ -101,11 +101,11 @@ def load_split_ids(base_dir, split_suffix='_mil_0.5', use_nr=False):
         test_path = os.path.join(base_dir, 'test_mil.txt')
     
     if os.path.exists(train_path):
-        train_ids = set(open(train_path).read().splitlines())
+        train_ids = set(line.strip() for line in open(train_path).read().splitlines() if line.strip())
     if os.path.exists(val_path):
-        val_ids = set(open(val_path).read().splitlines())
+        val_ids = set(line.strip() for line in open(val_path).read().splitlines() if line.strip())
     if os.path.exists(test_path):
-        test_ids = set(open(test_path).read().splitlines())
+        test_ids = set(line.strip() for line in open(test_path).read().splitlines() if line.strip())
     return train_ids, val_ids, test_ids
 
 if __name__ == '__main__':

@@ -119,7 +119,7 @@ def main():
                 truths.extend(lbl.cpu().numpy())
         acc = accuracy_score(truths, preds) if len(truths) > 0 else 0.0
         f1_m = f1_score(truths, preds, average='macro', zero_division=0) if len(truths) > 0 else 0.0
-        rep = classification_report(truths, preds, target_names=TARGET_NAMES, output_dict=True, zero_division=0) if len(truths) > 0 else {}
+        rep = classification_report(truths, preds, target_names=TARGET_NAMES, zero_division=0) if len(truths) > 0 else ""
         return loss_sum / max(len(truths), 1), acc, f1_m, rep
 
     print("\n--- Spouštím trénování Sequence ESM-2 MLP ---")
@@ -171,7 +171,7 @@ def main():
         _, test_acc, test_f1, test_rep = evaluate(test_loader)
         print(f"TEST     -> Acc: {test_acc:.4f} | Macro F1: {test_f1:.4f}")
         print("\nDetailní Testovací Report:")
-        print(classification_report(test_rep, target_names=TARGET_NAMES if 'acetyl-CoA' in test_rep else None))
+        print(test_rep)
 
 if __name__ == '__main__':
     main()
