@@ -32,8 +32,13 @@ import urllib.request
 
 import numpy as np
 import pandas as pd
-import torch
-from sklearn.metrics import accuracy_score, f1_score, classification_report, confusion_matrix
+try:
+    from sklearn.metrics import accuracy_score, f1_score, classification_report, confusion_matrix
+except ImportError:
+    accuracy_score = None
+    f1_score = None
+    classification_report = None
+    confusion_matrix = None
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT not in sys.path:
@@ -406,8 +411,8 @@ def extract_features_nise(downloaded_paths, prank_dirs, cache_path="nise_extract
 # KROK 5: FOLDSEEK 1-NN STRUKTURNÍ BENCHMARK
 # ============================================================================
 
-def run_foldseek_benchmark(downloaded_paths, sample_df, train_dir, threads=8):
-    """Spustí Foldseek 1-NN zarovnání testovacích NISE struktur proti trénovací sadě."""
+def run_foldseek_benchmark(downloaded_paths, sample_df, train_dir, split_suffix="mil_0.5", use_nr=True, threads=8):
+    """Spustí Foldseek 1-NN zarovnání testovacích NISE struktur proti trénovací sadě (s podporou split filtrů)."""
     if shutil.which("foldseek") is None or not train_dir or not os.path.exists(train_dir):
         print("⚠️ Foldseek není dostupný nebo chybí trénovací adresář. Přeskakuji.")
         return None
@@ -416,39 +421,88 @@ def run_foldseek_benchmark(downloaded_paths, sample_df, train_dir, threads=8):
     print(f"   Query set (NISE): {len(downloaded_paths)} struktur")
     print(f"   Target databáze (AMICO Train): {train_dir}")
 
+    # 1. Filtrování podle train splitu (pokud je specifikován)
+    train_ids = None
+    if split_suffix:
+        try:
+            from dataset import load_split_ids
+            tr_set, _, _ = load_split_ids(PROJECT_ROOT, split_suffix=split_suffix, use_nr=use_nr)
+            if tr_set:
+                train_ids = {os.path.basename(pid).lower().replace('clean_', '').replace('.pdb', '').replace('_merged', '') for pid in tr_set}
+                print(f"   🔒 Aplikován filtr trénovacího splitu ({split_suffix}, use_nr={use_nr}): {len(train_ids)} povolených proteinů.")
+            else:
+                print(f"   ⚠️ Varování: Split soubor pro {split_suffix} (use_nr={use_nr}) nenalezen nebo prázdný. Používám všechny PDB.")
+        except Exception as e:
+            print(f"   ⚠️ Nepodařilo se načíst split {split_suffix}: {e}")
+
     # Mapování target PDB na kofaktory
     train_pdbs = glob.glob(os.path.join(train_dir, "**", "*.pdb"), recursive=True)
     target_labels = {}
     for p in train_pdbs:
-        t_id = os.path.basename(p).replace('.pdb', '').replace('clean_', '')
-        for cname in TARGET_NAMES:
-            if cname.lower() in p.lower() or cname.upper() in p.upper():
-                target_labels[t_id.lower()] = TARGET_NAMES.index(cname)
-                break
+        t_id = os.path.basename(p).replace('.pdb', '').replace('clean_', '').replace('_MERGED', '').lower()
+        if t_id not in target_labels:
+            for cname in TARGET_NAMES:
+                if cname.lower() in p.lower() or cname.upper() in p.upper():
+                    target_labels[t_id] = TARGET_NAMES.index(cname)
+                    break
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         q_dir = os.path.join(tmp_dir, "queries")
+        fs_tmp = os.path.join(tmp_dir, "fs_tmp")
         os.makedirs(q_dir, exist_ok=True)
+        os.makedirs(fs_tmp, exist_ok=True)
+        
         for uid, p in downloaded_paths.items():
             dst = os.path.join(q_dir, f"{uid}.pdb")
-            if not os.path.exists(dst):
-                try: os.symlink(p, dst)
-                except OSError: shutil.copy2(p, dst)
+            abs_p = os.path.abspath(p)
+            if os.path.exists(abs_p):
+                shutil.copy2(abs_p, dst)
+            else:
+                print(f"⚠️ Chybí PDB soubor: {abs_p}")
 
         out_tsv = os.path.join(tmp_dir, "aln.tsv")
         cmd = [
             "foldseek", "easy-search",
-            q_dir, train_dir, out_tsv, os.path.join(tmp_dir, "fs_tmp"),
+            q_dir, train_dir, out_tsv, fs_tmp,
             "--format-output", "query,target,evalue,qtmscore,bits",
-            "-e", "10.0", "--threads", str(threads)
+            "-e", "10.0",
+            "--max-seqs", "2000",
+            "--threads", str(threads)
         ]
         
+        t0 = time.time()
         try:
-            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            if not os.path.exists(out_tsv): return None
-            df = pd.read_csv(out_tsv, sep='\t', header=None, names=["query", "target", "evalue", "qtmscore", "bits"])
-            df['query'] = df['query'].str.replace('.pdb', '', regex=False).str.lower()
-            df['target'] = df['target'].str.replace('.pdb', '', regex=False).str.replace('clean_', '', regex=False).str.lower()
+            res = subprocess.run(cmd, check=True, capture_output=True, text=True)
+            elapsed_sec = time.time() - t0
+        except subprocess.CalledProcessError as e:
+            print(f"❌ Chyba Foldseeku (exit code {e.returncode}):")
+            if e.stderr:
+                print(f"   Stderr: {e.stderr.strip()}")
+            if e.stdout:
+                print(f"   Stdout: {e.stdout.strip()}")
+            return None
+        except Exception as e:
+            print(f"❌ Neočekávaná chyba při spuštění Foldseeku: {e}")
+            return None
+
+        if not os.path.exists(out_tsv) or os.path.getsize(out_tsv) == 0:
+            print("⚠️ Foldseek nevygeneroval žádné výstupní zarovnání.")
+            return None
+
+        df = pd.read_csv(out_tsv, sep='\t', header=None, names=["query", "target", "evalue", "qtmscore", "bits"])
+        df['query'] = df['query'].apply(lambda x: os.path.basename(str(x)).replace('.pdb', '').lower())
+        df['target'] = df['target'].apply(lambda x: os.path.basename(str(x)).replace('.pdb', '').replace('clean_', '').replace('_merged', '').lower())
+        
+        # Filtrujeme pouze cíle z trénovacího splitu
+        if train_ids is not None:
+            orig_len = len(df)
+            df = df[df['target'].isin(train_ids)]
+            print(f"   Hitů před filtrem trénovací sady: {orig_len} -> po filtru train_ids: {len(df)}")
+            
+        if df.empty:
+            print("⚠️ Žádný hit neodpovídá trénovací sadě.")
+            top1_preds = {}
+        else:
             df = df.sort_values(by=['query', 'qtmscore'], ascending=[True, False])
             top1 = df.drop_duplicates(subset=['query'], keep='first')
             
@@ -459,21 +513,23 @@ def run_foldseek_benchmark(downloaded_paths, sample_df, train_dir, threads=8):
                 if t in target_labels:
                     top1_preds[q] = target_labels[t]
                     
-            y_true, y_pred = [], []
-            preds_by_uid = {}
-            for _, row in sample_df.iterrows():
-                uid = str(row['entry']).strip()
-                if uid not in downloaded_paths: continue
-                true_l = TARGET_NAMES.index(row['cofactor'])
-                y_true.append(true_l)
-                pred_l = top1_preds.get(uid.lower(), -1)
-                y_pred.append(pred_l)
-                preds_by_uid[uid] = pred_l
-                
-            return {'y_true': y_true, 'y_pred': y_pred, 'preds_by_uid': preds_by_uid}
-        except Exception as e:
-            print(f"Chyba Foldseeku: {e}")
-            return None
+        y_true, y_pred = [], []
+        preds_by_uid = {}
+        for _, row in sample_df.iterrows():
+            uid = str(row['entry']).strip()
+            if uid not in downloaded_paths: continue
+            true_l = TARGET_NAMES.index(row['cofactor'])
+            y_true.append(true_l)
+            pred_l = top1_preds.get(uid.lower(), -1)
+            y_pred.append(pred_l)
+            preds_by_uid[uid] = pred_l
+            
+        return {
+            'y_true': y_true, 
+            'y_pred': y_pred, 
+            'preds_by_uid': preds_by_uid,
+            'time_sec': elapsed_sec
+        }
 
 
 # ============================================================================
@@ -516,6 +572,7 @@ def evaluate_amico_models(sample_df, downloaded_paths, features_dict, models_dir
         y_true, y_pred = [], []
         preds_by_uid = {}
         
+        t0 = time.time()
         with torch.no_grad():
             for row in valid_samples:
                 uid = str(row['entry']).strip()
@@ -532,11 +589,13 @@ def evaluate_amico_models(sample_df, downloaded_paths, features_dict, models_dir
                 y_true.append(true_lbl)
                 y_pred.append(pred_lbl)
                 preds_by_uid[uid] = pred_lbl
+        elapsed_sec = time.time() - t0
                 
         results[mkey] = {
             'y_true': y_true,
             'y_pred': y_pred,
-            'preds_by_uid': preds_by_uid
+            'preds_by_uid': preds_by_uid,
+            'time_sec': elapsed_sec
         }
         
     return results
@@ -546,13 +605,26 @@ def evaluate_amico_models(sample_df, downloaded_paths, features_dict, models_dir
 # KROK 7: STATISTICKÉ VYHODNOCENÍ A REPORT
 # ============================================================================
 
+def df_to_markdown_simple(df):
+    """Převede DataFrame na Markdown tabulku i bez balíčku tabulate."""
+    try:
+        return df.to_markdown(index=False)
+    except Exception:
+        headers = [str(c) for c in df.columns]
+        lines = ["| " + " | ".join(headers) + " |"]
+        lines.append("| " + " | ".join(["---"] * len(headers)) + " |")
+        for _, row in df.iterrows():
+            lines.append("| " + " | ".join(str(row[h]) for h in df.columns) + " |")
+        return "\n".join(lines)
+
+
 def generate_nise_report(all_results, sample_df, out_prefix="nise_benchmark"):
     """Vypíše přehledné výsledky benchmarku na NISE nehomologních enzymecech."""
-    print("\n" + "=" * 105)
+    print("\n" + "=" * 135)
     print("                VÝSLEDKY NISE BENCHMARKU (NEHOMOLOGNÍ STRUKTURNÍ GENERALIZACE)                ")
-    print("=" * 105)
-    print(f"{'Model':<26s} | {'Vzorků':<7s} | {'Accuracy':<10s} | {'Macro F1':<10s} | {'Weighted F1':<12s} | {'acetyl-CoA':<10s} | {'ATP':<8s} | {'B12':<8s} | {'FAD':<8s} | {'NAD':<8s}")
-    print("-" * 120)
+    print("=" * 135)
+    print(f"{'Model':<22s} | {'Vzorků':<7s} | {'Accuracy':<10s} | {'Macro F1':<10s} | {'Čas (s)':<9s} | {'ms/vzorek':<10s} | {'acetyl-CoA':<10s} | {'ATP':<8s} | {'B12':<8s} | {'FAD':<8s} | {'NAD':<8s}")
+    print("-" * 135)
 
     summary_rows = []
     
@@ -560,15 +632,36 @@ def generate_nise_report(all_results, sample_df, out_prefix="nise_benchmark"):
         if not res: continue
         y_t = res['y_true']
         y_p = res['y_pred']
+        t_sec = res.get('time_sec', 0.0)
+        ms_per_sample = (t_sec / max(len(y_t), 1)) * 1000.0
+        time_str = f"{t_sec:6.2f} s" if t_sec > 0 else "   N/A  "
+        ms_str = f"{ms_per_sample:7.1f} ms" if t_sec > 0 else "   N/A   "
         
-        acc = accuracy_score(y_t, y_p)
-        f1_macro = f1_score(y_t, y_p, average='macro', zero_division=0)
-        f1_weighted = f1_score(y_t, y_p, average='weighted', zero_division=0)
-        rep = classification_report(y_t, y_p, target_names=TARGET_NAMES, labels=list(range(5)), output_dict=True, zero_division=0)
+        if accuracy_score is not None:
+            acc = accuracy_score(y_t, y_p)
+            f1_macro = f1_score(y_t, y_p, average='macro', zero_division=0)
+            f1_weighted = f1_score(y_t, y_p, average='weighted', zero_division=0)
+            rep = classification_report(y_t, y_p, target_names=TARGET_NAMES, labels=list(range(5)), output_dict=True, zero_division=0)
+            per_class = {c: rep.get(c, {}).get('f1-score', 0.0) * 100 for c in TARGET_NAMES}
+        else:
+            total = len(y_t)
+            correct = sum(1 for yt, yp in zip(y_t, y_p) if yt == yp)
+            acc = correct / max(total, 1)
+            per_class = {}
+            f1_list = []
+            for i, name in enumerate(TARGET_NAMES):
+                tp = sum(1 for yt, yp in zip(y_t, y_p) if yt == i and yp == i)
+                fp = sum(1 for yt, yp in zip(y_t, y_p) if yt != i and yp == i)
+                fn = sum(1 for yt, yp in zip(y_t, y_p) if yt == i and yp != i)
+                prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+                rec = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+                f1 = (2 * prec * rec) / (prec + rec) if (prec + rec) > 0 else 0.0
+                per_class[name] = f1 * 100.0
+                f1_list.append(f1)
+            f1_macro = sum(f1_list) / len(f1_list) if f1_list else 0.0
+            f1_weighted = f1_macro
         
-        per_class = {c: rep.get(c, {}).get('f1-score', 0.0) * 100 for c in TARGET_NAMES}
-        
-        print(f"{mkey:<26s} | {len(y_t):<7d} | {acc * 100:6.2f} %  | {f1_macro * 100:6.2f} %  | {f1_weighted * 100:6.2f} %    | {per_class['acetyl-CoA']:6.1f} %   | {per_class['ATP']:6.1f} % | {per_class['B12']:6.1f} % | {per_class['FAD']:6.1f} % | {per_class['NAD']:6.1f} %")
+        print(f"{mkey:<22s} | {len(y_t):<7d} | {acc * 100:6.2f} %  | {f1_macro * 100:6.2f} %  | {time_str:<9s} | {ms_str:<10s} | {per_class['acetyl-CoA']:6.1f} %   | {per_class['ATP']:6.1f} % | {per_class['B12']:6.1f} % | {per_class['FAD']:6.1f} % | {per_class['NAD']:6.1f} %")
         
         summary_rows.append({
             'Model': mkey,
@@ -576,6 +669,8 @@ def generate_nise_report(all_results, sample_df, out_prefix="nise_benchmark"):
             'Accuracy': round(acc * 100, 2),
             'Macro_F1': round(f1_macro * 100, 2),
             'Weighted_F1': round(f1_weighted * 100, 2),
+            'Time_Sec': round(t_sec, 2),
+            'ms_per_sample': round(ms_per_sample, 1),
             'F1_acetyl-CoA': round(per_class['acetyl-CoA'], 2),
             'F1_ATP': round(per_class['ATP'], 2),
             'F1_B12': round(per_class['B12'], 2),
@@ -583,7 +678,7 @@ def generate_nise_report(all_results, sample_df, out_prefix="nise_benchmark"):
             'F1_NAD': round(per_class['NAD'], 2)
         })
 
-    print("=" * 120 + "\n")
+    print("=" * 135 + "\n")
     
     # Detailní tabulka po jednotlivých proteinech
     det_rows = []
@@ -616,10 +711,10 @@ def generate_nise_report(all_results, sample_df, out_prefix="nise_benchmark"):
         f.write(f"Vygenerováno: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
         f.write("Dataset obsahuje nehomologní enzymy se stejnou funkcí a kofaktorem, ale z odlišných strukturních superfamilií (různé 3D foldy).\n\n")
         f.write("### Souhrnné výsledky\n\n")
-        f.write(sum_df.to_markdown(index=False))
+        f.write(df_to_markdown_simple(sum_df))
         f.write("\n\n")
         f.write("### Detailní ukázka z predikcí (prvních 15 vzorků)\n\n")
-        f.write(det_df.head(15).to_markdown(index=False))
+        f.write(df_to_markdown_simple(det_df.head(15)))
         f.write("\n")
 
     print(f"💾 Výstupy úspěšně uloženy:")
@@ -639,12 +734,17 @@ def main():
     parser.add_argument("--structures-dir", default="nise_structures", help="Složka pro stažené AlphaFold PDB struktury.")
     parser.add_argument("--models-dir", default=PROJECT_ROOT, help="Složka s modely (*_best.pt).")
     parser.add_argument("--train-dir", default=os.path.join(PROJECT_ROOT, "structures"), help="Trénovací struktury pro Foldseek.")
+    parser.add_argument("--split-suffix", default="mil_0.5", help="Přípona splitu pro trénovací sadu Foldseeku (např. mil_0.5).")
+    parser.add_argument("--use-nr", action="store_true", default=True, help="Použít Non-Redundant variantu trénovací sady (např. train_mil_0.5_nr0.95).")
+    parser.add_argument("--no-nr", dest="use_nr", action="store_false", help="Vypnout Non-Redundant filtr (použít train_mil_0.5 bez NR).")
+    parser.add_argument("--no-split-filter", action="store_true", help="Vypnout filtr splitů pro Foldseek (prohledávat celou složku structures bez omezení).")
     parser.add_argument("--prank-exec", default=None, help="Cesta k binárce P2Rank (prank).")
     parser.add_argument("--out-prefix", default="nise_benchmark", help="Prefix výstupních souborů.")
     parser.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu", "mps"])
     parser.add_argument("--threads", type=int, default=6)
     parser.add_argument("--skip-download", action="store_true", help="Přeskočí stahování struktur z AFDB.")
     parser.add_argument("--skip-foldseek", action="store_true", help="Přeskočí Foldseek benchmark.")
+    parser.add_argument("--clean-csv", default=None, help="Cesta k souboru predikcí CLEANu (*_maxsep.csv) pro zahrnutí do srovnání.")
     
     args = parser.parse_args()
 
@@ -657,6 +757,10 @@ def main():
     print("      AMICO: PIPELINE PRO BENCHMARK NEHOMOLOGNÍCH ENZYMŮ (NISE)      ")
     print("=" * 80)
     print(f"Zařízení: {device} | Počet vzorků na kofaktor: {args.sample_per_cofactor}")
+    if not args.no_split_filter:
+        print(f"Foldseek trénovací filtr: split={args.split_suffix}, use_nr={args.use_nr}")
+    else:
+        print("Foldseek trénovací filtr: VYPNUTO (všechny PDB v structures/)")
 
     # 1. Výběr vzorku
     sample_df = select_nise_sample(args.nise_tsv, sample_per_cofactor=args.sample_per_cofactor)
@@ -670,7 +774,7 @@ def main():
         for _, row in sample_df.iterrows():
             uid = str(row['entry']).strip()
             cof = str(row['cofactor']).strip()
-            p = os.path.join(args.structures_dir, cof, f"{uid}.pdb")
+            p = os.path.abspath(os.path.join(args.structures_dir, cof, f"{uid}.pdb"))
             if os.path.exists(p):
                 downloaded_paths[uid] = p
 
@@ -687,13 +791,40 @@ def main():
     # 5. Foldseek
     all_results = {}
     if not args.skip_foldseek:
-        fs_res = run_foldseek_benchmark(downloaded_paths, sample_df, train_dir=args.train_dir, threads=args.threads)
+        sfx = None if args.no_split_filter else args.split_suffix
+        fs_res = run_foldseek_benchmark(
+            downloaded_paths, sample_df, 
+            train_dir=args.train_dir, 
+            split_suffix=sfx,
+            use_nr=args.use_nr,
+            threads=args.threads
+        )
         if fs_res:
             all_results['foldseek_1nn'] = fs_res
 
     # 6. AMICO modely
     amico_res = evaluate_amico_models(sample_df, downloaded_paths, features_dict, models_dir=args.models_dir, device=device)
     all_results.update(amico_res)
+
+    # 6.5 CLEAN benchmark (pokud je zadán nebo nalezen soubor předpočítaných predikcí CLEAN)
+    clean_csv_cand = [
+        getattr(args, 'clean_csv', None),
+        "nise_clean_input_maxsep.csv",
+        "benchmarks/nise_clean_input_maxsep.csv",
+        os.path.join(PROJECT_ROOT, "nise_clean_input_maxsep.csv"),
+        os.path.join(PROJECT_ROOT, "benchmarks", "nise_clean_input_maxsep.csv"),
+    ]
+    clean_csv_path = next((p for p in clean_csv_cand if p and os.path.exists(p)), None)
+    if clean_csv_path:
+        print(f"\n🧪 Vyhodnocuji model CLEAN ze souboru {clean_csv_path}...")
+        try:
+            from benchmarks.clean_nise_benchmark import load_kegg_ec_mapping, parse_clean_maxsep_csv, evaluate_clean_on_nise
+            ec_map = load_kegg_ec_mapping()
+            c_preds = parse_clean_maxsep_csv(clean_csv_path)
+            c_res = evaluate_clean_on_nise(sample_df, c_preds, ec_map)
+            all_results['clean_ec_contrastive'] = c_res
+        except Exception as e:
+            print(f"⚠️ Chyba při vyhodnocení CLEANu: {e}")
 
     # 7. Vyhodnocení a report
     if all_results:

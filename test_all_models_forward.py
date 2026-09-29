@@ -9,8 +9,9 @@ from model_ligand_cross_attention_mil import LigandCrossAttentionMIL
 from model_egnn_mil import EGNN_MIL_Classifier
 from model_encoder_mil import EGNN_Encoder_MIL_Classifier
 from model_egnn_ligand_cross_attention_mil import EGNN_Ligand_Cross_Attention_MIL
+from model_egnn_self_attention_mil import EGNN_Self_Attention_MIL
 
-print("--- TESTING ALL 7 NEURAL MODELS ---")
+print("--- TESTING ALL 8 NEURAL MODELS ---")
 
 # 1. Dummy data for ESM models
 B = 2
@@ -74,4 +75,11 @@ out7, _ = m7(mega_batch, protein_idx, full_prot_feats_egnn)
 print(f"7. EGNN Ligand Cross-Attention MIL: Output shape = {out7.shape}")
 assert out7.shape == (2, 5)
 
-print("\n>>> ALL 7 NEURAL MODELS PASSED SHAPE & FORWARD VERIFICATION! <<<")
+# 8. EGNN Self-Attention MIL (EGNN pocket graphs + Sequence protein embedding + Self-Attention Transformer)
+m8 = EGNN_Self_Attention_MIL(node_dim=1280, full_protein_dim=1280, hidden_dim=128, num_gnn_layers=2, num_heads=4, num_attn_layers=1, num_classes=5, dropout=0.3)
+out8, attn8 = m8(mega_batch, protein_idx, full_prot_feats_egnn)
+print(f"8. EGNN Self-Attention MIL: Output shape = {out8.shape}, Attention weights shape = {attn8.shape}")
+assert out8.shape == (2, 5)
+assert attn8.shape[0] == 2 # Batch size
+
+print("\n>>> ALL 8 NEURAL MODELS PASSED SHAPE & FORWARD VERIFICATION! <<<")
