@@ -24,12 +24,11 @@ class EarlyStopping:
         if val_loss < self.best_loss - self.min_delta:
             self.best_loss = val_loss
             self.counter = 0
-            return True
         else:
             self.counter += 1
             if self.counter >= self.patience:
                 self.early_stop = True
-            return False
+        return self.early_stop
 
 def train_and_evaluate(args):
     device = torch.device('cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu'))
@@ -174,7 +173,8 @@ def train_and_evaluate(args):
             "val_f1_weighted": val_f1_w
         })
         
-        if early_stopping(val_loss):
+        early_stopping(val_loss)
+        if early_stopping.early_stop:
             print(f"\nEarly stopping aktivováno po epoše {epoch} (nejlepší Val Loss: {best_val_loss:.4f})")
             break
             

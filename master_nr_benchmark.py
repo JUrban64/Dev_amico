@@ -50,8 +50,43 @@ ALL_MODEL_KEYS = [
     "encoder_mil",
     "ligand_cross_mil",
     "egnn_mil",
-    "egnn_ligand_cross_mil"
+    "egnn_ligand_cross_mil",
+    "egnn_self_attention_mil"
 ]
+
+ALIAS_MAP = {
+    "egnn_self": "egnn_self_attention_mil",
+    "egnn_self_attention": "egnn_self_attention_mil",
+    "self": "self_attention_mil",
+    "self_attention": "self_attention_mil",
+    "cross": "cross_attention_mil",
+    "cross_attention": "cross_attention_mil",
+    "ligand_cross": "ligand_cross_mil",
+    "ligand_cross_attention": "ligand_cross_mil",
+    "egnn_ligand_cross": "egnn_ligand_cross_mil",
+    "egnn_ligand_cross_attention": "egnn_ligand_cross_mil",
+    "standard": "standard_mil",
+    "sequence_mlp": "sequence_mlp",
+    "seq_mlp": "sequence_mlp",
+    "mlp": "sequence_mlp",
+    "residue": "residue_mil",
+    "encoder": "encoder_mil",
+    "egnn": "egnn_mil",
+}
+
+def resolve_model_name(m_str):
+    clean = m_str.strip().lower()
+    if clean.endswith('.py'):
+        clean = clean[:-3]
+    if clean.startswith('model_'):
+        clean = clean[6:]
+    if clean in ALL_MODEL_KEYS:
+        return clean
+    if clean in ALIAS_MAP:
+        return ALIAS_MAP[clean]
+    if f"{clean}_mil" in ALL_MODEL_KEYS:
+        return f"{clean}_mil"
+    return None
 
 def find_structures_directory(user_dir=None):
     """Najde složku se strukturami v projektu."""
@@ -268,7 +303,7 @@ def check_data_dependencies(models, data_dir=None):
             needed.add('esm_full_proteins.pt')
         elif m in ['egnn_mil', 'encoder_mil']:
             needed.add('egnn_dataset.pt')
-        elif m in ['egnn_ligand_cross_mil']:
+        elif m in ['egnn_ligand_cross_mil', 'egnn_self_attention_mil']:
             needed.add('egnn_dataset.pt')
             needed.add('esm_full_proteins.pt')
     
@@ -667,7 +702,18 @@ def main():
 
     # 3. FÁZE: Spuštění benchmarku všech modelů
     if not args.skip_benchmark and not args.only_analysis:
-        target_models = ALL_MODEL_KEYS if 'all' in args.models else [m for m in args.models if m in ALL_MODEL_KEYS]
+        if 'all' in args.models:
+            target_models = ALL_MODEL_KEYS
+        else:
+            target_models = []
+            for m in args.models:
+                resolved = resolve_model_name(m)
+                if resolved:
+                    if resolved not in target_models:
+                        target_models.append(resolved)
+                else:
+                    print(f"⚠️ Upozornění: Model '{m}' nebyl rozpoznán a bude přeskočen! Dostupné modely: {ALL_MODEL_KEYS}")
+
         success = stage_3_run_benchmarks(
             target_splits=generated_splits,
             models=target_models,
@@ -678,11 +724,12 @@ def main():
         )
 
     # 4. FÁZE: Vyhodnocení rozdílů mezi No-NR a NR
+    eval_models = target_models if 'target_models' in locals() else (ALL_MODEL_KEYS if 'all' in args.models else [resolve_model_name(m) or m for m in args.models])
     stage_4_analyze_differences(
         out_prefix=args.out_prefix,
         tmscores=args.tmscores,
         nr_threshold=args.nr_threshold,
-        models=args.models,
+        models=eval_models,
         out_dir=PROJECT_ROOT / "data_statistics"
     )
 
